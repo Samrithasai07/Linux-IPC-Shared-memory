@@ -1,8 +1,8 @@
-# Linux-IPC-Shared-memory
-Ex06-Linux IPC-Shared-memory
+# Linux-IPC-Semaphores
+Ex05-Linux IPC-Semaphores
 
 # AIM:
-To Write a C program that illustrates two processes communicating using shared memory.
+To Write a C program that implements a producer-consumer system with two processes using Semaphores.
 
 # DESIGN STEPS:
 
@@ -12,7 +12,7 @@ Navigate to any Linux environment installed on the system or installed inside a 
 
 ### Step 2:
 
-Write the C Program using Linux Process API - Shared Memory
+Write the C Program using Linux Process API - Sempahores
 
 ### Step 3:
 
@@ -20,135 +20,121 @@ Execute the C Program for the desired output.
 
 # PROGRAM:
 
-## Write a C program that illustrates two processes communicating using shared memory.
+## Write a C program that implements a producer-consumer system with two processes using Semaphores.
 ```
-// shared_mem.c
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/shm.h>
-#include <sys/types.h>
-#include <sys/wait.h>
+/*
+ * sem.c - Producer-Consumer using Semaphores
+ */
+#include <stdio.h>      
+#include <stdlib.h>     
+#include <unistd.h>     
+#include <sys/types.h>  
+#include <sys/ipc.h>    
+#include <sys/sem.h>    
+#include <sys/wait.h>   
+#include <time.h>      
 
-#define TEXT_SZ 2048  // Shared memory size
+#define NUM_LOOPS 10  // Number of producer-consumer cycles
 
-struct shared_use_st {
-    int written;
-    char some_text[TEXT_SZ];
+// Define union semun if not already available
+union semun {
+    int val;               
+    struct semid_ds *buf;  
+    unsigned short int *array; 
+    struct seminfo *__buf;
 };
 
+// Function to wait (P operation) on semaphore
+void wait_semaphore(int sem_set_id) {
+    struct sembuf sem_op;
+    sem_op.sem_num = 0;
+    sem_op.sem_op = -1;  // Decrease semaphore value (Wait)
+    sem_op.sem_flg = 0;
+    semop(sem_set_id, &sem_op, 1);
+}
+
+// Function to signal (V operation) on semaphore
+void signal_semaphore(int sem_set_id) {
+    struct sembuf sem_op;
+    sem_op.sem_num = 0;
+    sem_op.sem_op = 1;  // Increase semaphore value (Signal)
+    sem_op.sem_flg = 0;
+    semop(sem_set_id, &sem_op, 1);
+}
+
 int main() {
-    int shmid;
-    void *shared_memory = (void *)0;
-    struct shared_use_st *shared_stuff;
+    int sem_set_id;
+    union semun sem_val;
+    int child_pid;
 
-    /* Create shared memory */
-    shmid = shmget((key_t)1234, sizeof(struct shared_use_st), 0666 | IPC_CREAT);
-    if (shmid == -1) {
-        perror("shmget");
-        exit(EXIT_FAILURE);
+    // Create a semaphore set with one semaphore
+    sem_set_id = semget(IPC_PRIVATE, 1, 0600);
+    if (sem_set_id == -1) {
+        perror("semget");
+        exit(1);
     }
 
-    printf("Shared memory id = %d\n", shmid);
+    printf("semaphore set created, semaphore set id '%d'.\n", sem_set_id);
 
-    /* Attach to shared memory */
-    shared_memory = shmat(shmid, (void *)0, 0);
-    if (shared_memory == (void *)-1) {
-        perror("shmat");
-        exit(EXIT_FAILURE);
+    // Initialize semaphore to 0 (Consumer must wait for Producer)
+    sem_val.val = 0;
+    if (semctl(sem_set_id, 0, SETVAL, sem_val) == -1) {
+        perror("semctl");
+        exit(1);
     }
-    printf("Memory attached at %p\n", shared_memory);
 
-    shared_stuff = (struct shared_use_st *)shared_memory;
-    shared_stuff->written = 0;
+    // Fork a child process
+    child_pid = fork();
 
-    pid_t pid = fork();
-
-    if (pid < 0) {
+    if (child_pid < 0) {
         perror("fork");
-        exit(EXIT_FAILURE);
+        exit(1);
     }
 
-    if (pid == 0) {  /* Child process (Consumer) */
-        while (1) {
-            while (shared_stuff->written == 0) {
-                sleep(1); /* wait for producer */
-            }
-
-            /* Print what producer wrote */
-            printf("Consumer received: %s", shared_stuff->some_text);
+    if (child_pid == 0) {  
+        // CHILD PROCESS: Consumer
+        for (int i = 0; i < NUM_LOOPS; i++) {
+            wait_semaphore(sem_set_id);  // Wait for producer
+            printf("consumer: '%d'\n", i);
             fflush(stdout);
-
-            if (strncmp(shared_stuff->some_text, "end", 3) == 0) {
-                break;
-            }
-
-            shared_stuff->written = 0; /* allow producer to write again */
         }
-
-        /* Detach shared memory */
-        if (shmdt(shared_memory) == -1) {
-            perror("shmdt");
-            exit(EXIT_FAILURE);
-        }
-        exit(EXIT_SUCCESS);
-    } else {  /* Parent process (Producer) */
-        char buffer[TEXT_SZ];
-
-        while (1) {
-            printf("Enter Some Text: ");
+        exit(0);
+    } else {  
+        // PARENT PROCESS: Producer
+        for (int i = 0; i < NUM_LOOPS; i++) {
+            printf("producer: '%d'\n", i);
             fflush(stdout);
-            if (fgets(buffer, TEXT_SZ, stdin) == NULL) {
-                /* EOF or error: send "end" to consumer and break */
-                strncpy(shared_stuff->some_text, "end\n", TEXT_SZ);
-                shared_stuff->written = 1;
-                break;
-            }
-
-            /* copy to shared memory and notify consumer */
-            strncpy(shared_stuff->some_text, buffer, TEXT_SZ - 1);
-            shared_stuff->some_text[TEXT_SZ - 1] = '\0';
-            shared_stuff->written = 1;
-
-            /* print what was written (optional) */
-            printf("Producer wrote: %s", shared_stuff->some_text);
-
-            if (strncmp(buffer, "end", 3) == 0) {
-                break;
-            }
-
-            /* wait until consumer has read it */
-            while (shared_stuff->written == 1) {
-                sleep(1);
-            }
+            signal_semaphore(sem_set_id);  // Signal consumer
+            usleep(500000); // Sleep to allow consumer to process
         }
 
-        /* Wait for child */
+        // Wait for child to finish
         wait(NULL);
 
-        /* Detach and remove shared memory */
-        if (shmdt(shared_memory) == -1) {
-            perror("shmdt");
-            exit(EXIT_FAILURE);
-        }
-
-        if (shmctl(shmid, IPC_RMID, 0) == -1) {
-            perror("shmctl");
-            exit(EXIT_FAILURE);
-        }
-
-        printf("Shared memory removed.\n");
-        exit(EXIT_SUCCESS);
+        // Remove the semaphore set
+        semctl(sem_set_id, 0, IPC_RMID, sem_val);
+        printf("Semaphore removed.\n");
     }
+
+    return 0;
 }
 ```
 
 
 
-
 ## OUTPUT
-<img width="670" height="274" alt="image" src="https://github.com/user-attachments/assets/2f39a053-0b9f-46c5-b959-e11bf88c2059" />
+$ ./sem.o
+
+
+<img width="579" height="479" alt="image" src="https://github.com/user-attachments/assets/fd93d862-3b5c-4415-bf6f-8240f3b696eb" />
+
+
+$ ipcs
+
+<img width="670" height="274" alt="image" src="https://github.com/user-attachments/assets/b96fb895-7c4e-4cc3-9616-f13255b6a39d" />
+
+
+
 
 
 # RESULT:
